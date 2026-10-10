@@ -1,0 +1,13 @@
+# Verified target: 64-bit CPython 3.14 on Windows.
+# Standard PySide6 distribution supplies the supported Windows Qt loader and widget bindings.
+PySide6==6.12.0
+mediapipe==1.1.0
+opencv-contrib-python==4.14.0.94
+numpy==2.5.3
+scikit-learn==1.9.1
+pyttsx3==2.99
+joblib==1.6.0
+pytest==9.1.1
+PyInstaller==6.22.3
+# MediaPipe's official Tasks detector asset is provided under models/hand_landmarker.task.
+# See models/NOTICE.md; no ISL recognition model is bundled.
