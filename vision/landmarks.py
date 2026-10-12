@@ -5,7 +5,7 @@ import sys
 import time
 import numpy as np
 
-FEATURE_VERSION = "hands2-mirrored-swap-side-local63-wristxyz-scale-v4"
+FEATURE_VERSION = "hands2-gray-mirrored-swap-side-local63-wristxyz-scale-v5"
 HAND_FEATURE_DIM = 68
 FEATURE_DIM = HAND_FEATURE_DIM * 2
 SIDES = ("Left", "Right")
@@ -98,7 +98,7 @@ class LandmarkExtractor:
     """Lazy local MediaPipe Tasks wrapper; detects and labels up to two hands."""
     def __init__(self, static_image_mode: bool = True, max_hands: int = 2,
                  mirrored_input: bool = False, min_hand_confidence: float = 0.45,
-                 swap_handedness: bool = True):
+                 swap_handedness: bool = True, grayscale_input: bool = True):
         try:
             import mediapipe as mp
             from mediapipe.tasks.python import vision
@@ -131,6 +131,7 @@ class LandmarkExtractor:
         self._static = static_image_mode
         self.mirrored_input = bool(mirrored_input)
         self.swap_handedness = bool(swap_handedness)
+        self.grayscale_input = bool(grayscale_input)
         self._timestamp = 0
         self.last_hands: list[dict] = []
 
@@ -139,6 +140,9 @@ class LandmarkExtractor:
         import cv2
         if self.mirrored_input:
             frame_bgr = cv2.flip(frame_bgr, 1)
+        if self.grayscale_input:
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            frame_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
         if self._static:

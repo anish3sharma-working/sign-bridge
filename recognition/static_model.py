@@ -7,17 +7,20 @@ import numpy as np
 from config.settings import FEATURE_VERSION
 from vision.landmarks import FEATURE_DIM
 
-ARTIFACT_VERSION = 4
+ARTIFACT_VERSION = 5
 
 
 class StaticClassifier:
     def __init__(self, estimator, classes: list[str], threshold: float = 0.65,
-                 mirrored_input: bool = False, swap_handedness: bool = True):
+                 mirrored_input: bool = False, swap_handedness: bool = True,
+                 model_mode: str = "unified", target_label: str | None = None):
         self.estimator = estimator
         self.classes = list(classes)
         self.threshold = float(threshold)
         self.mirrored_input = bool(mirrored_input)
         self.swap_handedness = bool(swap_handedness)
+        self.model_mode = str(model_mode)
+        self.target_label = target_label
 
     def predict(self, feature) -> tuple[str | None, float, list[tuple[str, float]]]:
         x = np.asarray(feature, dtype=np.float32).reshape(1, -1)
@@ -27,21 +30,26 @@ class StaticClassifier:
         ranking = sorted(zip(self.estimator.classes_, probabilities), key=lambda item: float(item[1]), reverse=True)
         candidates = [(str(label), float(score)) for label, score in ranking[:3]]
         label, confidence = candidates[0]
-        return (label if confidence >= self.threshold else None, confidence, candidates)
+        return (label if label != "__other__" and confidence >= self.threshold else None, confidence, candidates)
 
     @staticmethod
     def save(path: str | Path, estimator, classes: list[str], metrics: dict,
-             mirrored_input: bool = False, swap_handedness: bool = True) -> Path:
+             mirrored_input: bool = False, swap_handedness: bool = True,
+             model_mode: str = "unified", target_label: str | None = None) -> Path:
+        if model_mode not in {"alphabet", "commands", "unified"}:
+            raise ValueError("Model mode must be alphabet, commands, or unified.")
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"artifact_version": ARTIFACT_VERSION, "feature_version": FEATURE_VERSION,
                    "feature_dim": FEATURE_DIM, "mirrored_input": bool(mirrored_input),
-                   "swap_handedness": bool(swap_handedness),
+                   "swap_handedness": bool(swap_handedness), "model_mode": model_mode,
+                   "target_label": target_label,
                    "classes": list(classes), "estimator": estimator}
         joblib.dump(payload, path)
         metadata = {"artifact_version": ARTIFACT_VERSION, "feature_version": FEATURE_VERSION,
                     "feature_dim": FEATURE_DIM, "mirrored_input": bool(mirrored_input),
-                    "swap_handedness": bool(swap_handedness),
+                    "swap_handedness": bool(swap_handedness), "model_mode": model_mode,
+                    "target_label": target_label,
                     "classes": list(classes), "metrics": metrics,
                     "warning": "Only load model files trained and exported by your trusted SignBridge installation."}
         path.with_suffix(path.suffix + ".json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -49,7 +57,8 @@ class StaticClassifier:
 
     @staticmethod
     def load(path: str | Path, threshold: float = 0.65,
-             mirrored_input: bool = False, swap_handedness: bool = True) -> "StaticClassifier":
+             mirrored_input: bool = False, swap_handedness: bool = True,
+             model_mode: str = "unified", target_label: str | None = None) -> "StaticClassifier":
         path = Path(path)
         if path.suffix.lower() != ".joblib" or not path.is_file():
             raise ValueError("Select an existing .joblib model created by SignBridge.")
@@ -60,7 +69,9 @@ class StaticClassifier:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError("Model metadata is unreadable or corrupted.") from exc
-        if meta.get("artifact_version") != ARTIFACT_VERSION or meta.get("feature_version") != FEATURE_VERSION or meta.get("feature_dim") != FEATURE_DIM:
+        if (meta.get("artifact_version") != ARTIFACT_VERSION or meta.get("feature_version") != FEATURE_VERSION
+                or meta.get("feature_dim") != FEATURE_DIM or meta.get("model_mode", "unified") != model_mode
+                or meta.get("target_label") != target_label):
             raise ValueError("Model version or feature dimensions are incompatible with this application.")
         if bool(meta.get("mirrored_input", False)) != bool(mirrored_input):
             raise ValueError("Model input mirroring setting differs from the current handedness setting. Restore the training setting or retrain the model.")
@@ -73,7 +84,9 @@ class StaticClassifier:
         if (not isinstance(payload, dict) or payload.get("feature_version") != FEATURE_VERSION
                 or payload.get("feature_dim") != FEATURE_DIM
                 or bool(payload.get("mirrored_input", False)) != bool(mirrored_input)
-                or bool(payload.get("swap_handedness", False)) != bool(swap_handedness)):
+                or bool(payload.get("swap_handedness", False)) != bool(swap_handedness)
+                or payload.get("model_mode", "unified") != model_mode
+                or payload.get("target_label") != target_label):
             raise ValueError("Model contents do not match the metadata format.")
         classes = payload.get("classes")
         estimator = payload.get("estimator")
@@ -83,4 +96,4 @@ class StaticClassifier:
             raise ValueError("Model class mapping does not match its metadata sidecar.")
         if list(getattr(estimator, "classes_", [])) != classes or getattr(estimator, "n_features_in_", None) != FEATURE_DIM:
             raise ValueError("Estimator class mapping or feature count is incompatible with the model metadata.")
-        return StaticClassifier(estimator, classes, threshold, mirrored_input, swap_handedness)
+        return StaticClassifier(estimator, classes, threshold, mirrored_input, swap_handedness, model_mode, target_label)

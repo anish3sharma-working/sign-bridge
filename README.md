@@ -12,6 +12,45 @@ The computer-vision path uses the official MediaPipe Hand Landmarker task asset 
 
 Other implemented features include local image/video imports with still/first-frame preview, webcam frame collection, class and sample metadata, dataset metadata export, group leakage checks and insufficient-group warnings, versioned model metadata, confidence rejection, temporal stability, and explicit manual prediction acceptance. The **Flip camera/media horizontally (selfie orientation)** setting physically flips pixels before detection and mirrors the live preview. The separate **Swap detected Left/Right labels** correction is enabled by default in response to the reported reversed labels, and can be switched off if calibration shows that your camera already reports sides as expected. Both controls affect training and inference; changing either requires retraining. The bilateral feature schema is version 4: earlier models are intentionally rejected. Transcript editing, undo/clear/copy/save, text export, basic punctuation/spacing normalization, optional local text-to-speech, SQLite persistence, adjustable 5–30 FPS inference frequency, JSON settings, history deletion, and local privacy disclosures are also included.
 
+### Recognition modes
+
+SignBridge supports three model modes over the same bilateral landmark feature contract:
+
+- **Alphabet** — trains and loads only classes explicitly marked as alphabet classes, such as `a` through `z`.
+- **Commands** — trains and loads only classes explicitly marked as command classes, such as `hello` or `thank_you`.
+- **Unified** — trains and loads all alphabet and command classes together.
+
+Each mode has its own local model artifact and evaluation record. The Dataset Manager assigns every class to Alphabet or Commands, while the Model Training and Live Recognition screens select Alphabet, Commands, or Unified. Raw datasets and trained artifacts remain local and are not part of the Git repository. Alphabet transcript assembly and dynamic-sign sequence modeling remain later development phases; the current models recognize static poses or a selected frame from imported video.
+
+If a source archive has no participant or recording-session metadata, the leakage-safe trainer refuses to report independent metrics. The training screen offers an explicit **exploratory sample-level split** only for a first technical model check; its metrics are labeled as non-independent and must not be treated as generalization accuracy.
+
+The training screen also supports **Individual class** training. This creates a one-vs-rest detector: the selected class is the positive label and every other compatible class is mapped to `__other__`. It is useful for diagnosing a difficult letter or command and rejects unrelated poses instead of treating a one-class dataset as universally positive. Individual artifacts include the target class in their metadata and are loaded only with the matching target contract.
+
+### Separate image and dynamic pipelines
+
+The project now includes two experimental deep-learning pipelines that are deliberately separate from the landmark Random Forest:
+
+1. **Alphabet CNN** — `scripts/train_alphabet_cnn.py` trains a grayscale 128×128 image CNN directly on `.work/organized-dataset/alphabet`. It learns visual appearance rather than MediaPipe landmarks and writes a `.pt` artifact under the local SignBridge models directory.
+2. **Dynamic command GRU** — `scripts/train_dynamic_commands.py` decodes every frame of each registered command video, extracts bilateral landmarks in temporal order, uniformly resamples each sequence to 32 frames, and trains a GRU. It writes `signbridge_commands_dynamic_gru_v1.pt` locally.
+
+Before training, run `scripts/diagnose_datasets.py`. It reports per-class image/video decode failures and hand-landmark usability in `.work/diagnostics/dataset_report.json`. The current UI/live worker still uses the static landmark model; CNN and GRU artifacts are not silently mixed into that path. They must be validated through their dedicated preprocessing contracts before being connected to live mode.
+
+Install the deep-learning dependency with the rest of the requirements:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Example commands:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\diagnose_datasets.py
+.\.venv\Scripts\python.exe scripts\train_alphabet_cnn.py --epochs 8
+.\.venv\Scripts\python.exe scripts\train_dynamic_commands.py --epochs 25 --allow-exploratory-split
+```
+
+These first reports are exploratory because the supplied archives do not contain participant/session metadata. They are not general ISL accuracy claims.
+
 ## Architecture
 
 ```text
@@ -26,6 +65,8 @@ Training: local media → MediaPipe → normalized hand features → grouped par
 ```
 
 The desktop UI communicates with worker results through Qt signals. Recognition and training are separated from UI widgets. The app remains a desktop application: no web server, cloud service, account, external inference, or mobile app is set up by this implementation. A separate future mobile client can be designed against stable interfaces after the feature and model formats mature.
+
+By default, SignBridge converts imported images/videos and live webcam frames to grayscale before MediaPipe hand detection. This keeps the training and inference preprocessing contract aligned for grayscale datasets. The setting is available under Settings & Privacy; changing it requires retraining, and models trained under a different preprocessing contract are rejected.
 
 ## Runtime and dependencies
 

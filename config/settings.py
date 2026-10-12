@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 APP_NAME = "SignBridge"
-FEATURE_VERSION = "hands2-mirrored-swap-side-local63-wristxyz-scale-v4"
+FEATURE_VERSION = "hands2-gray-mirrored-swap-side-local63-wristxyz-scale-v5"
 
 
 def app_data_dir() -> Path:
@@ -31,6 +31,8 @@ def defaults() -> dict:
         "theme": "dark",
         "manual_confirmation": True,
         "show_landmarks": True,
+        "recognition_mode": "unified",
+        "grayscale_input": True,
     }
 
 

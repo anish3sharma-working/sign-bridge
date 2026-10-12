@@ -97,13 +97,18 @@ class TrainingWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, database_path: Path, model_dir: Path, mirrored_input=False,
-                 min_hand_confidence=0.45, swap_handedness=True):
+                 min_hand_confidence=0.45, swap_handedness=True, model_mode="unified",
+                 allow_non_independent=False, grayscale_input=True, target_label=None):
         super().__init__()
         self.database_path = database_path
         self.model_dir = model_dir
         self.mirrored_input = bool(mirrored_input)
         self.min_hand_confidence = float(min_hand_confidence)
         self.swap_handedness = bool(swap_handedness)
+        self.model_mode = str(model_mode)
+        self.allow_non_independent = bool(allow_non_independent)
+        self.grayscale_input = bool(grayscale_input)
+        self.target_label = target_label
         self.cancel_event = threading.Event()
 
     def cancel(self):
@@ -113,7 +118,9 @@ class TrainingWorker(QThread):
         try:
             result = train_static(self.database_path, self.model_dir, self.progress.emit,
                                   self.cancel_event, self.mirrored_input,
-                                  self.min_hand_confidence, self.swap_handedness)
+                                  self.min_hand_confidence, self.swap_handedness,
+                                  self.model_mode, self.allow_non_independent,
+                                  self.grayscale_input, self.target_label)
             self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -206,6 +213,9 @@ class SignBridgeWindow(QMainWindow):
     def _live_page(self):
         layout = QVBoxLayout(); layout.setSpacing(14)
         layout.addLayout(title_block("Live recognition", "Start the webcam explicitly. Frames and landmark inference are processed locally and are never uploaded."))
+        mode_row = QHBoxLayout(); mode_row.addWidget(QLabel("Recognition mode"))
+        self.live_mode = QComboBox(); self._populate_mode_combo(self.live_mode, self.settings.get("recognition_mode")); self.live_mode.currentIndexChanged.connect(self.change_recognition_mode)
+        mode_row.addWidget(self.live_mode); mode_row.addStretch(1); layout.addLayout(mode_row)
         panels = QHBoxLayout(); panels.setSpacing(14)
         left = QGroupBox("Camera"); lv = QVBoxLayout(left)
         self.video_label = QLabel("Camera is off\n\nSelect Start camera when ready")
@@ -250,8 +260,9 @@ class SignBridgeWindow(QMainWindow):
         classes = QGroupBox("Gesture classes"); cv = QHBoxLayout(classes)
         self.class_name = QLineEdit(); self.class_name.setPlaceholderText("e.g. a validated static gesture label")
         self.class_description = QLineEdit(); self.class_description.setPlaceholderText("Optional description")
+        self.class_mode = QComboBox(); self._populate_mode_combo(self.class_mode, "commands", include_unified=False)
         add = QPushButton("Add class"); add.setObjectName("primary"); add.clicked.connect(self.add_class)
-        cv.addWidget(self.class_name, 2); cv.addWidget(self.class_description, 2); cv.addWidget(add)
+        cv.addWidget(self.class_name, 2); cv.addWidget(self.class_description, 2); cv.addWidget(self.class_mode); cv.addWidget(add)
         layout.addWidget(classes)
         import_box = QGroupBox("Import local media"); iv = QHBoxLayout(import_box)
         self.import_class = QComboBox(); self.import_group = QLineEdit(); self.import_group.setPlaceholderText("Recording group (default uses import batch)")
@@ -273,6 +284,12 @@ class SignBridgeWindow(QMainWindow):
         layout.addLayout(title_block("Model training", "Train a local Random Forest from real, labeled landmark samples. No built-in vocabulary or benchmark score is supplied."))
         overview = card(); ov = QVBoxLayout(overview)
         self.training_dataset_summary = QLabel("Dataset not inspected yet"); self.training_dataset_summary.setWordWrap(True); ov.addWidget(self.training_dataset_summary)
+        mode_row = QHBoxLayout(); mode_row.addWidget(QLabel("Train model mode")); self.training_mode = QComboBox(); self._populate_mode_combo(self.training_mode, self.settings.get("recognition_mode")); self.training_mode.currentIndexChanged.connect(self.refresh_training_targets); mode_row.addWidget(self.training_mode); mode_row.addStretch(1); ov.addLayout(mode_row)
+        target_row = QHBoxLayout(); target_row.addWidget(QLabel("Individual class (optional)")); self.training_target = QComboBox(); target_row.addWidget(self.training_target); target_row.addStretch(1); ov.addLayout(target_row)
+        self.refresh_training_targets()
+        self.exploratory_split = QCheckBox("Allow exploratory sample-level split when session metadata is unavailable")
+        self.exploratory_split.setToolTip("Use only for a first technical model check. Its metrics are not independent generalization evidence.")
+        ov.addWidget(self.exploratory_split)
         warning = QLabel("Leakage guard: SignBridge keeps participant groups together when supplied; otherwise it keeps each recording group together. Each label needs at least three distinct groups and enough class coverage for independent train, validation, and test sets."); warning.setObjectName("muted"); warning.setWordWrap(True); ov.addWidget(warning)
         layout.addWidget(overview)
         row = QHBoxLayout(); self.train_btn = QPushButton("Start training"); self.train_btn.setObjectName("primary"); self.train_btn.clicked.connect(self.start_training); self.cancel_train_btn = QPushButton("Cancel training"); self.cancel_train_btn.setEnabled(False); self.cancel_train_btn.clicked.connect(self.cancel_training); row.addWidget(self.train_btn); row.addWidget(self.cancel_train_btn); row.addStretch(1); layout.addLayout(row)
@@ -308,10 +325,13 @@ class SignBridgeWindow(QMainWindow):
         self.set_swap_handedness = QCheckBox("Swap detected Left/Right labels")
         self.set_swap_handedness.setChecked(bool(self.settings.get("swap_handedness")))
         self.set_swap_handedness.setToolTip("Camera-specific correction. Leave enabled if the app currently calls your left hand Right (or vice versa). This affects training features too, so changing it requires retraining.")
+        self.set_grayscale_input = QCheckBox("Convert camera and training media to grayscale before detection")
+        self.set_grayscale_input.setChecked(bool(self.settings.get("grayscale_input")))
+        self.set_grayscale_input.setToolTip("Uses the same grayscale preprocessing for imported images/videos and live webcam frames. Changing it requires retraining.")
         self.set_speech = QCheckBox("Enable local text-to-speech"); self.set_speech.setChecked(bool(self.settings.get("speech_enabled")))
         self.set_rate = QSpinBox(); self.set_rate.setRange(80, 300); self.set_rate.setValue(int(self.settings.get("speech_rate")))
         self.set_theme = QComboBox(); self.set_theme.addItems(["dark", "light"]); self.set_theme.setCurrentText(self.settings.get("theme"))
-        form.addRow("Camera index", self.set_camera); form.addRow("Requested resolution", self._pair(self.set_width, self.set_height)); form.addRow("Maximum inference frequency (FPS)", self.set_inference_fps); form.addRow("Hand detector confidence", self.set_hand_confidence); form.addRow("Minimum model score (uncalibrated)", self.set_threshold); form.addRow("Stable frames before confirmation", self.set_stability); form.addRow("Image orientation", self.set_mirrored_input); form.addRow("Hand label correction", self.set_swap_handedness); form.addRow("Speech rate", self.set_rate); form.addRow("Theme", self.set_theme); form.addRow("Speech", self.set_speech)
+        form.addRow("Camera index", self.set_camera); form.addRow("Requested resolution", self._pair(self.set_width, self.set_height)); form.addRow("Maximum inference frequency (FPS)", self.set_inference_fps); form.addRow("Hand detector confidence", self.set_hand_confidence); form.addRow("Minimum model score (uncalibrated)", self.set_threshold); form.addRow("Stable frames before confirmation", self.set_stability); form.addRow("Image orientation", self.set_mirrored_input); form.addRow("Hand label correction", self.set_swap_handedness); form.addRow("Preprocessing", self.set_grayscale_input); form.addRow("Speech rate", self.set_rate); form.addRow("Theme", self.set_theme); form.addRow("Speech", self.set_speech)
         layout.addWidget(box)
         row = QHBoxLayout(); save = QPushButton("Save settings"); save.setObjectName("primary"); save.clicked.connect(self.save_settings); reset = QPushButton("Reset settings"); reset.clicked.connect(self.reset_settings); row.addWidget(save); row.addWidget(reset); row.addStretch(1); layout.addLayout(row)
         privacy = QGroupBox("Privacy & data handling"); pv = QVBoxLayout(privacy)
@@ -324,6 +344,17 @@ class SignBridgeWindow(QMainWindow):
     @staticmethod
     def _pair(left, right):
         row = QWidget(); l = QHBoxLayout(row); l.setContentsMargins(0, 0, 0, 0); l.addWidget(left); l.addWidget(QLabel("×")); l.addWidget(right); return row
+
+    @staticmethod
+    def _populate_mode_combo(combo, current="unified", include_unified=True):
+        combo.clear()
+        modes = [("Alphabet", "alphabet"), ("Commands", "commands")]
+        if include_unified:
+            modes.append(("Unified (alphabet + commands)", "unified"))
+        for label, value in modes:
+            combo.addItem(label, value)
+        index = combo.findData(current)
+        combo.setCurrentIndex(index if index >= 0 else 0)
 
     def apply_theme(self, theme):
         self.setStyleSheet(LIGHT_STYLE if theme == "light" else DARK_STYLE)
@@ -339,8 +370,18 @@ class SignBridgeWindow(QMainWindow):
         if index == 4: self.refresh_history()
         if index == 1: self.refresh_class_combos()
 
+    def change_recognition_mode(self):
+        if not hasattr(self, "live_mode"): return
+        mode = self.live_mode.currentData()
+        self.settings.set("recognition_mode", mode)
+        if self.camera and self.camera.isRunning():
+            self.stop_camera()
+        self._load_model()
+        self.refresh_dashboard()
+
     def _load_model(self):
-        record = self.db.latest_model()
+        mode = self.live_mode.currentData() if hasattr(self, "live_mode") else self.settings.get("recognition_mode")
+        record = self.db.latest_model(mode)
         if not record or not Path(record["model_path"]).is_file():
             self.model = None
             return
@@ -349,13 +390,13 @@ class SignBridgeWindow(QMainWindow):
             trusted_dir = (self.data_root / "models").resolve()
             if not model_path.is_relative_to(trusted_dir):
                 raise ValueError("The recorded model is outside the SignBridge local model folder.")
-            self.model = StaticClassifier.load(model_path, float(self.settings.get("confidence_threshold")), bool(self.settings.get("mirrored_input")), bool(self.settings.get("swap_handedness")))
+            self.model = StaticClassifier.load(model_path, float(self.settings.get("confidence_threshold")), bool(self.settings.get("mirrored_input")), bool(self.settings.get("swap_handedness")), mode, record.get("target_label"))
         except Exception as exc:
             self.model = None
             LOG.warning("Could not load saved model: %s", exc)
 
     def _refresh_all(self):
-        self.refresh_dashboard(); self.refresh_class_combos(); self.refresh_dataset(); self.refresh_history(); self.refresh_training_summary()
+        self.refresh_dashboard(); self.refresh_class_combos(); self.refresh_training_targets(); self.refresh_dataset(); self.refresh_history(); self.refresh_training_summary()
 
     def refresh_dashboard(self):
         classes = self.db.list_classes(); samples = self.db.list_samples()
@@ -363,7 +404,7 @@ class SignBridgeWindow(QMainWindow):
         self.dashboard_samples.setText(f"{len(samples)} local samples across {len(classes)} classes")
         self.dashboard_camera.setText("Stopped" if not (self.camera and self.camera.isRunning()) else "Active")
         if self.model:
-            self.dashboard_model.setText("Trained model available")
+            self.dashboard_model.setText(f"Trained {self.model.model_mode.title()} model available")
             self.dashboard_model_detail.setText("Loaded local model classes: " + ", ".join(self.model.classes))
         else:
             self.dashboard_model.setText("Recognition setup required")
@@ -376,10 +417,21 @@ class SignBridgeWindow(QMainWindow):
             current = combo.currentData()
             combo.clear()
             for cls in classes:
-                combo.addItem(f"{cls['label']}  ·  {cls['sample_count']} samples", cls["id"])
+                combo.addItem(f"{cls['label']}  ·  {cls.get('recognition_mode', 'commands')}  ·  {cls['sample_count']} samples", cls["id"])
             if current is not None:
                 idx = combo.findData(current)
                 if idx >= 0: combo.setCurrentIndex(idx)
+
+    def refresh_training_targets(self):
+        if not hasattr(self, "training_target"): return
+        mode = self.training_mode.currentData()
+        current = self.training_target.currentData()
+        self.training_target.clear(); self.training_target.addItem("All compatible classes", None)
+        for cls in self.db.list_classes():
+            if mode == "unified" or cls.get("recognition_mode") == mode:
+                self.training_target.addItem(f"{cls['label']} ({cls['sample_count']} samples)", cls["label"])
+        index = self.training_target.findData(current)
+        self.training_target.setCurrentIndex(index if index >= 0 else 0)
 
     def refresh_dataset(self):
         if not hasattr(self, "sample_table"): return
@@ -392,7 +444,7 @@ class SignBridgeWindow(QMainWindow):
 
     def add_class(self):
         try:
-            self.db.add_class(self.class_name.text(), self.class_description.text())
+            self.db.add_class(self.class_name.text(), self.class_description.text(), recognition_mode=self.class_mode.currentData())
             self.class_name.clear(); self.class_description.clear(); self.refresh_dataset()
         except Exception as exc: QMessageBox.warning(self, "Could not add class", str(exc))
 
@@ -496,14 +548,15 @@ class SignBridgeWindow(QMainWindow):
         if self.camera and self.camera.isRunning(): return
         self.settings.set("camera_index", self.camera_index.value())
         self.model = None
-        rec = self.db.latest_model()
+        mode = self.live_mode.currentData() if hasattr(self, "live_mode") else self.settings.get("recognition_mode")
+        rec = self.db.latest_model(mode)
         if rec and Path(rec["model_path"]).exists():
             try:
                 model_path = Path(rec["model_path"]).resolve()
                 if not model_path.is_relative_to((self.data_root / "models").resolve()): raise ValueError("Model is outside the local SignBridge model directory.")
-                self.model = StaticClassifier.load(model_path, float(self.settings.get("confidence_threshold")), bool(self.settings.get("mirrored_input")), bool(self.settings.get("swap_handedness")))
+                self.model = StaticClassifier.load(model_path, float(self.settings.get("confidence_threshold")), bool(self.settings.get("mirrored_input")), bool(self.settings.get("swap_handedness")), mode, rec.get("target_label"))
             except Exception as exc: LOG.warning("Model load failed: %s", exc)
-        self.camera = CameraWorker(self.camera_index.value(), int(self.settings.get("camera_width")), int(self.settings.get("camera_height")), self.landmark_toggle.isChecked(), self.model, float(self.settings.get("confidence_threshold")), int(self.settings.get("stability_frames")), int(self.settings.get("inference_fps")), self, mirrored_input=bool(self.settings.get("mirrored_input")), min_hand_confidence=float(self.settings.get("min_hand_confidence")), swap_handedness=bool(self.settings.get("swap_handedness")))
+        self.camera = CameraWorker(self.camera_index.value(), int(self.settings.get("camera_width")), int(self.settings.get("camera_height")), self.landmark_toggle.isChecked(), self.model, float(self.settings.get("confidence_threshold")), int(self.settings.get("stability_frames")), int(self.settings.get("inference_fps")), self, mirrored_input=bool(self.settings.get("mirrored_input")), min_hand_confidence=float(self.settings.get("min_hand_confidence")), swap_handedness=bool(self.settings.get("swap_handedness")), grayscale_input=bool(self.settings.get("grayscale_input")))
         self.camera.frame_ready.connect(self.show_frame); self.camera.prediction_ready.connect(self.show_prediction); self.camera.status.connect(self.camera_status.setText); self.camera.error.connect(self.show_camera_error)
         self.camera.hand_status.connect(self.hand_detection_status.setText)
         self.start_camera_btn.setEnabled(False); self.stop_camera_btn.setEnabled(True); self.camera.start()
@@ -591,7 +644,9 @@ class SignBridgeWindow(QMainWindow):
 
     def start_training(self):
         if self.training_worker and self.training_worker.isRunning(): return
-        self.training_worker = TrainingWorker(self.db.path, self.data_root / "models", bool(self.settings.get("mirrored_input")), float(self.settings.get("min_hand_confidence")), bool(self.settings.get("swap_handedness")))
+        mode = self.training_mode.currentData()
+        self.settings.set("recognition_mode", mode)
+        self.training_worker = TrainingWorker(self.db.path, self.data_root / "models", bool(self.settings.get("mirrored_input")), float(self.settings.get("min_hand_confidence")), bool(self.settings.get("swap_handedness")), mode, self.exploratory_split.isChecked(), bool(self.settings.get("grayscale_input")), self.training_target.currentData())
         self.training_worker.progress.connect(self.training_status.setText)
         self.training_worker.completed.connect(self.training_complete)
         self.training_worker.failed.connect(self.training_failed)
@@ -603,13 +658,19 @@ class SignBridgeWindow(QMainWindow):
 
     def training_complete(self, result):
         self.train_btn.setEnabled(True); self.cancel_train_btn.setEnabled(False); self.training_progress.setVisible(False)
-        self.model = StaticClassifier.load(result["model_path"], float(self.settings.get("confidence_threshold")), bool(self.settings.get("mirrored_input")), bool(self.settings.get("swap_handedness")))
+        mode = result["report"].get("model_mode", self.training_mode.currentData())
+        if hasattr(self, "live_mode"):
+            index = self.live_mode.findData(mode)
+            if index >= 0: self.live_mode.setCurrentIndex(index)
+        target_label = result["report"].get("target_label")
+        self.model = StaticClassifier.load(result["model_path"], float(self.settings.get("confidence_threshold")), bool(self.settings.get("mirrored_input")), bool(self.settings.get("swap_handedness")), mode, target_label)
         report = result["report"]
         val = report["validation"]; test = report["test"]
         self.training_status.setText(f"Training complete. Model saved locally: {result['model_path']}")
-        self.training_metrics.setPlainText(json.dumps({"validation": {"sample_count": val["sample_count"], "accuracy": val["accuracy"], "balanced_accuracy": val["balanced_accuracy"]}, "held_out_test": {"sample_count": test["sample_count"], "accuracy": test["accuracy"], "balanced_accuracy": test["balanced_accuracy"], "classification_report": test["classification_report"], "confusion_matrix": test["confusion_matrix"], "class_order": test["class_order"]}, "usable_samples": report["usable_samples"], "failed_samples": report["failed_samples"], "confidence_note": report["confidence_note"]}, indent=2))
+        self.training_metrics.setPlainText(json.dumps({"validation": {"sample_count": val["sample_count"], "accuracy": val["accuracy"], "balanced_accuracy": val["balanced_accuracy"]}, "held_out_test": {"sample_count": test["sample_count"], "accuracy": test["accuracy"], "balanced_accuracy": test["balanced_accuracy"], "classification_report": test["classification_report"], "confusion_matrix": test["confusion_matrix"], "class_order": test["class_order"]}, "usable_samples": report["usable_samples"], "failed_samples": report["failed_samples"], "confidence_note": report["confidence_note"], "evaluation_warning": report.get("evaluation_warning", "")}, indent=2))
         self.refresh_dashboard()
-        QMessageBox.information(self, "Training complete", f"Model trained and evaluated on independent local data. Held-out test accuracy: {test['accuracy']:.3f}. This is your dataset's result, not a general ISL accuracy claim.")
+        note = report.get("evaluation_warning") or "Evaluation used independent recording/participant groups."
+        QMessageBox.information(self, "Training complete", f"Model trained. Held-out test accuracy: {test['accuracy']:.3f}.\n\n{note}\n\nThis is your dataset's result, not a general ISL accuracy claim.")
 
     def training_failed(self, error):
         self.train_btn.setEnabled(True); self.cancel_train_btn.setEnabled(False); self.training_progress.setVisible(False); self.training_status.setText("Training did not complete.")
@@ -650,7 +711,7 @@ class SignBridgeWindow(QMainWindow):
             self.db.clear_transcripts(); self.refresh_history()
 
     def save_settings(self):
-        updates = {"camera_index": self.set_camera.value(), "camera_width": int(self.set_width.currentText()), "camera_height": int(self.set_height.currentText()), "inference_fps": self.set_inference_fps.value(), "min_hand_confidence": self.set_hand_confidence.value(), "mirrored_input": self.set_mirrored_input.isChecked(), "swap_handedness": self.set_swap_handedness.isChecked(), "confidence_threshold": self.set_threshold.value(), "stability_frames": self.set_stability.value(), "speech_enabled": self.set_speech.isChecked(), "speech_rate": self.set_rate.value(), "theme": self.set_theme.currentText(), "show_landmarks": self.landmark_toggle.isChecked() if hasattr(self, "landmark_toggle") else bool(self.settings.get("show_landmarks"))}
+        updates = {"camera_index": self.set_camera.value(), "camera_width": int(self.set_width.currentText()), "camera_height": int(self.set_height.currentText()), "inference_fps": self.set_inference_fps.value(), "min_hand_confidence": self.set_hand_confidence.value(), "mirrored_input": self.set_mirrored_input.isChecked(), "swap_handedness": self.set_swap_handedness.isChecked(), "grayscale_input": self.set_grayscale_input.isChecked(), "confidence_threshold": self.set_threshold.value(), "stability_frames": self.set_stability.value(), "speech_enabled": self.set_speech.isChecked(), "speech_rate": self.set_rate.value(), "theme": self.set_theme.currentText(), "show_landmarks": self.landmark_toggle.isChecked() if hasattr(self, "landmark_toggle") else bool(self.settings.get("show_landmarks"))}
         for key, value in updates.items(): self.settings.set(key, value)
         self.camera_index.setValue(self.set_camera.value())
         self.apply_theme(self.settings.get("theme")); self._load_model(); QMessageBox.information(self, "Settings saved", "Settings are saved locally.")
@@ -661,7 +722,7 @@ class SignBridgeWindow(QMainWindow):
         self.set_camera.setValue(int(self.settings.get("camera_index"))); self.set_width.setCurrentText(str(self.settings.get("camera_width"))); self.set_height.setCurrentText(str(self.settings.get("camera_height")))
         self.set_inference_fps.setValue(int(self.settings.get("inference_fps"))); self.set_threshold.setValue(float(self.settings.get("confidence_threshold"))); self.set_stability.setValue(int(self.settings.get("stability_frames")))
         self.set_hand_confidence.setValue(float(self.settings.get("min_hand_confidence"))); self.set_mirrored_input.setChecked(bool(self.settings.get("mirrored_input")))
-        self.set_swap_handedness.setChecked(bool(self.settings.get("swap_handedness")))
+        self.set_swap_handedness.setChecked(bool(self.settings.get("swap_handedness"))); self.set_grayscale_input.setChecked(bool(self.settings.get("grayscale_input")))
         self.set_speech.setChecked(bool(self.settings.get("speech_enabled"))); self.set_rate.setValue(int(self.settings.get("speech_rate"))); self.set_theme.setCurrentText(self.settings.get("theme")); self.landmark_toggle.setChecked(bool(self.settings.get("show_landmarks")))
         self.camera_index.setValue(int(self.settings.get("camera_index"))); self.apply_theme(self.settings.get("theme")); self._load_model()
         QMessageBox.information(self, "Settings reset", "Default preferences are restored. Existing samples and transcripts are unchanged.")

@@ -54,3 +54,14 @@ def test_model_rejects_different_left_right_correction(tmp_path):
     assert loaded.swap_handedness is True
     with pytest.raises(ValueError, match="Left/Right correction"):
         StaticClassifier.load(path, mirrored_input=True, swap_handedness=False)
+
+
+def test_model_mode_is_recorded_and_validated(tmp_path):
+    rng = np.random.default_rng(21)
+    x = rng.normal(size=(8, FEATURE_DIM)).astype(np.float32)
+    estimator = RandomForestClassifier(n_estimators=3, random_state=7).fit(x, ["a"] * 4 + ["b"] * 4)
+    path = StaticClassifier.save(tmp_path / "alphabet.joblib", estimator, ["a", "b"], {}, model_mode="alphabet")
+    loaded = StaticClassifier.load(path, threshold=0.0, model_mode="alphabet")
+    assert loaded.model_mode == "alphabet"
+    with pytest.raises(ValueError, match="incompatible"):
+        StaticClassifier.load(path, model_mode="commands")

@@ -38,6 +38,7 @@ class Database:
                     label TEXT NOT NULL UNIQUE COLLATE NOCASE,
                     description TEXT NOT NULL DEFAULT '',
                     gesture_type TEXT NOT NULL DEFAULT 'static',
+                    recognition_mode TEXT NOT NULL DEFAULT 'commands',
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS dataset_samples (
@@ -68,12 +69,23 @@ class Database:
                     feature_version TEXT NOT NULL,
                     class_mapping TEXT NOT NULL,
                     evaluation_summary TEXT NOT NULL,
+                    model_mode TEXT NOT NULL DEFAULT 'unified',
+                    target_label TEXT,
                     created_at TEXT NOT NULL
                 );
                 PRAGMA user_version = 1;
             """)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(gesture_classes)").fetchall()}
+            if "recognition_mode" not in columns:
+                conn.execute("ALTER TABLE gesture_classes ADD COLUMN recognition_mode TEXT NOT NULL DEFAULT 'commands'")
+            model_columns = {row[1] for row in conn.execute("PRAGMA table_info(models)").fetchall()}
+            if "model_mode" not in model_columns:
+                conn.execute("ALTER TABLE models ADD COLUMN model_mode TEXT NOT NULL DEFAULT 'unified'")
+            if "target_label" not in model_columns:
+                conn.execute("ALTER TABLE models ADD COLUMN target_label TEXT")
 
-    def add_class(self, label: str, description: str = "", gesture_type: str = "static") -> int:
+    def add_class(self, label: str, description: str = "", gesture_type: str = "static",
+                  recognition_mode: str = "commands") -> int:
         clean = " ".join(label.strip().split())
         if not clean or len(clean) > 60:
             raise ValueError("Enter a gesture label between 1 and 60 characters.")
@@ -81,10 +93,12 @@ class Database:
             raise ValueError("Gesture labels cannot contain path separators or filesystem-reserved characters.")
         if gesture_type not in {"static", "dynamic"}:
             raise ValueError("Gesture type must be static or dynamic.")
+        if recognition_mode not in {"alphabet", "commands"}:
+            raise ValueError("Recognition mode must be alphabet or commands.")
         with self.connect() as conn:
             cur = conn.execute(
-                "INSERT INTO gesture_classes(label, description, gesture_type, created_at) VALUES(?,?,?,?)",
-                (clean, description.strip(), gesture_type, utc_now()),
+                "INSERT INTO gesture_classes(label, description, gesture_type, recognition_mode, created_at) VALUES(?,?,?,?,?)",
+                (clean, description.strip(), gesture_type, recognition_mode, utc_now()),
             )
             return int(cur.lastrowid)
 
@@ -94,7 +108,7 @@ class Database:
 
     def list_classes(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            rows = conn.execute("""SELECT c.id, c.label, c.description, c.gesture_type, c.created_at,
+            rows = conn.execute("""SELECT c.id, c.label, c.description, c.gesture_type, c.recognition_mode, c.created_at,
                 COUNT(s.id) AS sample_count FROM gesture_classes c
                 LEFT JOIN dataset_samples s ON s.class_id=c.id
                 GROUP BY c.id ORDER BY c.label COLLATE NOCASE""").fetchall()
@@ -169,12 +183,18 @@ class Database:
         return json.loads(row[0]) if row else default
 
     def record_model(self, name: str, path: str, feature_version: str,
-                     class_mapping: list[str], metrics: dict[str, Any]) -> None:
+                     class_mapping: list[str], metrics: dict[str, Any],
+                     model_mode: str = "unified", target_label: str | None = None) -> None:
+        if model_mode not in {"alphabet", "commands", "unified"}:
+            raise ValueError("Model mode must be alphabet, commands, or unified.")
         with self.connect() as conn:
-            conn.execute("INSERT INTO models(model_name,model_path,feature_version,class_mapping,evaluation_summary,created_at) VALUES(?,?,?,?,?,?)",
-                         (name, path, feature_version, json.dumps(class_mapping), json.dumps(metrics), utc_now()))
+            conn.execute("INSERT INTO models(model_name,model_path,feature_version,class_mapping,evaluation_summary,model_mode,target_label,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                         (name, path, feature_version, json.dumps(class_mapping), json.dumps(metrics), model_mode, target_label, utc_now()))
 
-    def latest_model(self) -> dict[str, Any] | None:
+    def latest_model(self, model_mode: str | None = None) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM models ORDER BY id DESC LIMIT 1").fetchone()
+            if model_mode is None:
+                row = conn.execute("SELECT * FROM models ORDER BY id DESC LIMIT 1").fetchone()
+            else:
+                row = conn.execute("SELECT * FROM models WHERE model_mode = ? ORDER BY id DESC LIMIT 1", (model_mode,)).fetchone()
         return dict(row) if row else None

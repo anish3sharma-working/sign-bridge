@@ -18,7 +18,8 @@ class CameraWorker(QThread):
 
     def __init__(self, camera_index=0, width=640, height=480, show_landmarks=True,
                  model=None, threshold=0.65, stable_frames=5, inference_fps=15, parent=None,
-                 mirrored_input=False, min_hand_confidence=0.45, swap_handedness=True):
+                 mirrored_input=False, min_hand_confidence=0.45, swap_handedness=True,
+                 grayscale_input=True):
         super().__init__(parent)
         self.camera_index = int(camera_index)
         self.width = int(width)
@@ -30,6 +31,7 @@ class CameraWorker(QThread):
         self.mirrored_input = bool(mirrored_input)
         self.min_hand_confidence = float(min_hand_confidence)
         self.swap_handedness = bool(swap_handedness)
+        self.grayscale_input = bool(grayscale_input)
         self._stop_event = threading.Event()
         self._frame_lock = threading.Lock()
         self._latest_frame = None
@@ -61,7 +63,8 @@ class CameraWorker(QThread):
                 extractor = LandmarkExtractor(static_image_mode=False, max_hands=2,
                                               mirrored_input=self.mirrored_input,
                                               min_hand_confidence=self.min_hand_confidence,
-                                              swap_handedness=self.swap_handedness)
+                                              swap_handedness=self.swap_handedness,
+                                              grayscale_input=self.grayscale_input)
             except RuntimeError as exc:
                 self.status.emit("Camera active; landmark recognition unavailable")
                 self.error.emit(str(exc))

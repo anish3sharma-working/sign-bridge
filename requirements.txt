@@ -7,6 +7,7 @@ numpy==2.5.3
 scikit-learn==1.9.1
 pyttsx3==2.99
 joblib==1.6.0
+torch>=2.7
 pytest==9.1.1
 PyInstaller==6.22.3
 # MediaPipe's official Tasks detector asset is provided under models/hand_landmarker.task.
